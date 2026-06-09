@@ -1,0 +1,36 @@
+[app]
+name = "keycloak"
+version = "0.1.0"
+description = "Keycloak identity provider - public auth backend for managed OpenHost customers"
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/_healthz"
+# OpenHost public_paths are PREFIX matches. Anonymous (non-owner) visitors
+# must be able to reach the OIDC endpoints, realm login pages, the account
+# console, and static theme assets. Everything else (notably "/" and
+# "/admin") stays behind OpenHost zone auth.
+#
+# NOTE: "/realms/" includes "/realms/master". The in-container auth proxy
+# (auth_proxy.py) additionally enforces that /admin and /realms/master are
+# only reachable by requests carrying X-OpenHost-Is-Owner: true, so the
+# Keycloak admin login surface is never exposed to anonymous traffic.
+public_paths = [
+    "/realms/",
+    "/resources/",
+    "/js/",
+    "/robots.txt",
+]
+
+[resources]
+# Keycloak (JVM) + Postgres in one container. The JVM heap is capped in
+# start.sh; 2 GiB total gives comfortable headroom for both.
+memory_mb = 2048
+cpu_millicores = 2000
+
+[data]
+app_data = true

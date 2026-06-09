@@ -40,7 +40,11 @@ LISTEN_PORT = int(os.environ.get("PROXY_LISTEN_PORT", "8080"))
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = int(os.environ.get("KC_UPSTREAM_PORT", "8081"))
 
-MAX_BODY_BYTES = 64 * 1024 * 1024  # generous; realm imports can be large
+# Owner requests (admin console, realm imports) get a generous cap;
+# anonymous internet traffic (login forms, token requests) needs far less,
+# and a small cap limits memory-exhaustion abuse on this public port.
+MAX_BODY_BYTES_OWNER = 64 * 1024 * 1024
+MAX_BODY_BYTES_ANON = 1 * 1024 * 1024
 CLIENT_TIMEOUT_SECONDS = 60
 UPSTREAM_TIMEOUT_SECONDS = 120
 
@@ -163,14 +167,16 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_simple(404, b"not found\n")
             return
 
-        body, error = self._read_body()
+        body, error = self._read_body(
+            MAX_BODY_BYTES_OWNER if is_owner else MAX_BODY_BYTES_ANON
+        )
         if error:
             return
 
         upstream_headers = self._build_upstream_headers(body)
         self._forward(body, upstream_headers)
 
-    def _read_body(self):
+    def _read_body(self, max_body_bytes: int):
         transfer_encoding = (self.headers.get("Transfer-Encoding") or "").lower()
         if "chunked" in transfer_encoding:
             self._send_simple(411, b"chunked transfer encoding not supported; send Content-Length\n")
@@ -186,7 +192,7 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
         if length < 0:
             self._send_simple(400, b"bad Content-Length\n")
             return None, True
-        if length > MAX_BODY_BYTES:
+        if length > max_body_bytes:
             self._send_simple(413, b"request body too large\n")
             return None, True
         try:
@@ -209,13 +215,16 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
                 continue
             if lower in ("host", "content-length"):
                 continue
-            # Collapse duplicates with a comma per RFC 9110.
-            if key in headers or lower in (existing.lower() for existing in headers):
-                for existing in list(headers):
-                    if existing.lower() == lower:
-                        headers[existing] = headers[existing] + ", " + value
-                        break
-            else:
+            # Collapse duplicate header lines: cookies join with "; "
+            # (RFC 6265), everything else with ", " (RFC 9110).
+            separator = "; " if lower == "cookie" else ", "
+            merged = False
+            for existing in list(headers):
+                if existing.lower() == lower:
+                    headers[existing] = headers[existing] + separator + value
+                    merged = True
+                    break
+            if not merged:
                 headers[key] = value
 
         forwarded_host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"

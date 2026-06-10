@@ -8,10 +8,10 @@
 #   3. auth_proxy.py        (0.0.0.0:8080, the OpenHost-routed port)
 #
 # Secrets policy: NOTHING secret is ever written to $OPENHOST_APP_DATA_DIR
-# (other apps, e.g. file-browser, can read that directory). The per-boot
-# bootstrap admin credentials used for OpenHost owner SSO live only in
-# process environments. The Postgres password is a fixed constant; Postgres
-# only listens on loopback inside this container, so it is not a secret.
+# (other apps, e.g. file-browser, can read that directory). The first-boot
+# bootstrap admin credentials live only in process environments and the
+# container log. The Postgres password is a fixed constant; Postgres only
+# listens on loopback inside this container, so it is not a secret.
 
 set -u
 
@@ -80,6 +80,16 @@ if ! psql_super -tAc "SELECT 1 FROM pg_database WHERE datname='keycloak'" | grep
     psql_super -c "CREATE DATABASE keycloak OWNER keycloak" >/dev/null
 fi
 
+# "Fresh" means Keycloak has never initialized its schema in this
+# database (also covers a first boot that crashed before Keycloak got
+# that far, not just a database we created moments ago).
+FRESH_DATABASE=0
+if ! psql_super -d keycloak -tAc \
+    "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='user_entity'" \
+    | grep -q 1; then
+    FRESH_DATABASE=1
+fi
+
 # ---------------------------------------------------------------- keycloak
 export KC_DB_URL="jdbc:postgresql://127.0.0.1:5432/keycloak"
 export KC_DB_USERNAME="keycloak"
@@ -95,34 +105,33 @@ export KC_HOSTNAME_STRICT="false"
 # proxy share the same container.
 export JAVA_OPTS_KC_HEAP="-Xms128m -Xmx1024m"
 
-# Per-boot bootstrap admin for OpenHost owner SSO: the auth proxy drives
-# Keycloak's browser login with these credentials to auto-log the OpenHost
-# owner into the admin console. A fresh user with a random password is
-# created on every container start (the proxy deletes stale ones from
-# previous boots once Keycloak is up); neither value is written to disk.
-SSO_USER="openhost-sso-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-SSO_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-export SSO_USER SSO_PASSWORD
+# First-boot admin bootstrap: on a completely fresh database, create a
+# temporary admin with a random password and print the credentials to the
+# container log (visible via `podman logs` / the OpenHost dashboard, host
+# operators only). Log in at /admin/ (gated behind OpenHost owner auth),
+# create permanent named admin accounts for every human who needs access,
+# then delete the temporary one. All admin-console logins go through
+# Keycloak's own authentication, so admin events are attributable to
+# individual users.
+if [ "$FRESH_DATABASE" = 1 ]; then
+    export KC_BOOTSTRAP_ADMIN_USERNAME="admin"
+    KC_BOOTSTRAP_ADMIN_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+    export KC_BOOTSTRAP_ADMIN_PASSWORD
+    echo "[start] ============================================================"
+    echo "[start] First boot: creating temporary Keycloak admin"
+    echo "[start]   username: $KC_BOOTSTRAP_ADMIN_USERNAME"
+    echo "[start]   password: $KC_BOOTSTRAP_ADMIN_PASSWORD"
+    echo "[start] Log in at /admin/, create permanent admin users, then"
+    echo "[start] delete this temporary account."
+    echo "[start] ============================================================"
+fi
 
 # -------------------------------------------------------------- auth proxy
 # Started before the (slow) Keycloak JVM so OpenHost's readiness probe on
 # the routed port is answered immediately.
-PROXY_LISTEN_PORT=8080 KC_UPSTREAM_PORT=8081 KC_MANAGEMENT_PORT=9000 \
+PROXY_LISTEN_PORT=8080 KC_UPSTREAM_PORT=8081 \
     python3 /app/auth_proxy.py &
 PROXY_PID=$!
-
-# bootstrap-admin runs against the database directly (Keycloak is not up
-# yet). On a completely fresh database it also performs the initial
-# bootstrap. If it fails, fall back to the server's own first-boot
-# bootstrap envs (only effective on an empty database) so a fresh install
-# still gets an admin; on an existing database a failure here merely means
-# owner auto-login degrades to Keycloak's login form for this boot.
-if ! gosu keycloak /opt/keycloak/bin/kc.sh bootstrap-admin user \
-    --username:env SSO_USER --password:env SSO_PASSWORD --no-prompt --optimized; then
-    echo "[start] WARN: bootstrap-admin failed; falling back to server bootstrap envs" >&2
-    export KC_BOOTSTRAP_ADMIN_USERNAME="$SSO_USER"
-    export KC_BOOTSTRAP_ADMIN_PASSWORD="$SSO_PASSWORD"
-fi
 
 gosu keycloak /opt/keycloak/bin/kc.sh start --optimized --import-realm &
 KC_PID=$!

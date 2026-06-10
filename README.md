@@ -40,36 +40,44 @@ stamp with `X-OpenHost-Is-Owner: true`. The router strips client-supplied
 `X-OpenHost-*` headers, so that header cannot be forged. Net effect:
 
 - Anonymous internet users: customer realm logins + OIDC only.
-- OpenHost zone owner: everything, including the admin console.
+- OpenHost zone owner: everything, including the admin console — with
+  **automatic login** (see below).
 
-The Keycloak admin console still requires a Keycloak admin login on top of
-OpenHost owner auth (see bootstrap below) — OpenHost auth gates *reach*,
-Keycloak auth gates *privilege*.
+## Owner SSO / admin bootstrap
 
-## First boot / admin bootstrap
+The OpenHost owner is logged into the Keycloak admin console
+automatically; there is no Keycloak login form to fill in. How it works:
 
-On first boot, `start.sh` generates a random temporary admin password and
-prints it to the **container log only** (nothing secret is ever written to
-`$OPENHOST_APP_DATA_DIR`, which other apps such as file-browser can read):
+1. On every container start, `start.sh` generates a random per-boot
+   bootstrap admin (`openhost-sso-<hex>` + random password) via
+   `kc.sh bootstrap-admin user`. The credentials live only in process
+   environments — **nothing secret is ever written to
+   `$OPENHOST_APP_DATA_DIR`**, which other apps such as file-browser can
+   read.
+2. When a request stamped `X-OpenHost-Is-Owner: true` navigates to a
+   non-public page without a Keycloak session, `auth_proxy.py` drives
+   Keycloak's own browser login on loopback with those credentials and
+   replays the resulting `KEYCLOAK_*` session cookies onto the owner's
+   browser (plus a short-lived `OPENHOST_KC_SSO` marker cookie, since
+   Keycloak scopes its cookies to `/realms/master/` where the proxy can't
+   see them). The admin console's OIDC flow then completes silently.
+3. Once Keycloak is up, the proxy deletes stale `openhost-sso-*` users
+   left over from previous boots, so exactly one per-boot admin exists.
 
-```
-[start]   username: admin
-[start]   password: <random>
-```
+Consequences worth knowing:
 
-Read it via the app logs on the OpenHost dashboard (or
-`podman logs openhost-keycloak`). Then:
-
-1. Log in at `https://keycloak.<zone>/admin/` (you must be logged in as the
-   OpenHost owner to reach it).
-2. Create a permanent admin user in the master realm and delete the
-   temporary `admin` user (Keycloak marks it as temporary and nags until
-   you do).
-
-If the very first boot fails before Keycloak initializes, a fresh password
-is generated and printed on the next start. The detection is DB-backed (no
-marker files): bootstrap happens whenever the master realm doesn't exist
-yet.
+- Logging out of the admin console just triggers a fresh silent auto-login
+  on the next navigation; "logout" is effectively a no-op for the owner.
+- Anonymous visitors on public paths are never auto-logged-in.
+- Keycloak shows a "temporary admin user" notice in the admin console;
+  that user is this boot's SSO account. You can create permanent admin
+  users for other humans, but the temporary one is recreated every boot
+  by design — don't rely on deleting it for security (it is unreachable
+  without OpenHost owner auth anyway).
+- If auto-login ever breaks, recover with
+  `podman exec openhost-keycloak gosu keycloak /opt/keycloak/bin/kc.sh
+  bootstrap-admin user --optimized` on the host, then log in manually at
+  `/admin/` (owner-gated).
 
 ## The `openhost-customers` realm
 
@@ -147,6 +155,6 @@ Postgres image layers).
 Dockerfile                     # KC dist (optimized build) + Ubuntu/Postgres/JRE
 openhost.toml                  # manifest: port 8080, public_paths, 2 GiB
 start.sh                       # supervisor: postgres + keycloak + proxy
-auth_proxy.py                  # routed-port front proxy (stdlib only)
+auth_proxy.py                  # routed-port front proxy + owner SSO (stdlib only)
 realms/openhost-customers.json # imported-on-first-boot customer realm
 ```

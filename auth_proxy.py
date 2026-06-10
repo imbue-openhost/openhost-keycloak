@@ -132,10 +132,16 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("[proxy] %s - %s\n" % (self.address_string(), fmt % args))
 
     def _send_simple(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8", extra_headers=None):
+        # Locally-generated responses (health, placeholder, rejections) may
+        # be sent without the request body having been read. Close the
+        # connection so unread body bytes can never be parsed as a
+        # follow-up request on a kept-alive connection (request desync).
+        self.close_connection = True
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             for key, value in (extra_headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
@@ -168,8 +174,14 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- core
     def _handle(self):
-        if self.path.split("?", 1)[0] == "/_healthz":
+        bare_path = self.path.split("?", 1)[0]
+        if bare_path == "/_healthz":
             self._send_simple(200, b"ok\n")
+            return
+        if bare_path == "/robots.txt":
+            # A public IdP's login pages have no business being indexed
+            # (Keycloak itself 404s robots.txt).
+            self._send_simple(200, b"User-agent: *\nDisallow: /\n")
             return
 
         is_owner = (self.headers.get(OWNER_HEADER) or "").strip().lower() == "true"
@@ -213,7 +225,9 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_simple(408, b"timed out reading request body\n")
             return None, True
         if len(body) != length:
-            # Short read; client went away or lied about length.
+            # Short read; client went away or lied about length. No
+            # response can safely be written; just drop the connection.
+            self.close_connection = True
             return None, True
         return body, False
 

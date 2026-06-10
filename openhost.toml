@@ -16,11 +16,18 @@ health_check = "/_healthz"
 # "/admin") stays behind OpenHost zone auth.
 #
 # NOTE: "/realms/" includes "/realms/master". The in-container auth proxy
-# (auth_proxy.py) additionally enforces that /admin and /realms/master are
-# only reachable by requests carrying X-OpenHost-Is-Owner: true, so the
-# Keycloak admin login surface is never exposed to anonymous traffic.
+# (auth_proxy.py) additionally enforces that /realms/master and the admin
+# console (/admin outside /admin/realms/) are only reachable by requests
+# carrying X-OpenHost-Is-Owner: true, so the Keycloak admin login surface
+# is never exposed to anonymous traffic.
+#
+# "/admin/realms/" is Keycloak's admin REST API. It is public at the
+# routing layer so trusted external backends (confidential clients with
+# service accounts, e.g. manage-users) can manage user accounts; Keycloak
+# enforces its own bearer-token auth on every one of these endpoints.
 public_paths = [
     "/realms/",
+    "/admin/realms/",
     "/resources/",
     "/js/",
     "/robots.txt",

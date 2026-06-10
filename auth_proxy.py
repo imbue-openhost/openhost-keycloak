@@ -11,13 +11,15 @@ Responsibilities:
 
 2. Owner gating (defense in depth): OpenHost's ``public_paths`` for this
    app includes ``/realms/`` so anonymous customers can reach OIDC
-   endpoints and realm login pages. The Keycloak *admin* surface must not
-   be anonymous, so requests to ``/admin`` and ``/realms/master`` are
-   rejected unless the OpenHost router stamped ``X-OpenHost-Is-Owner:
-   true`` (the router strips any client-supplied ``X-OpenHost-*`` headers,
-   so the header is trustworthy). Authentication into the admin console
-   itself is Keycloak's own: admins sign in with their personal Keycloak
-   accounts, so admin events are attributable to individual users.
+   endpoints and realm login pages. The Keycloak admin *console* must not
+   be anonymous, so requests to ``/admin`` (other than the admin REST API
+   under ``/admin/realms/``, which Keycloak itself protects with bearer
+   tokens) and ``/realms/master`` are rejected unless the OpenHost router
+   stamped ``X-OpenHost-Is-Owner: true`` (the router strips any
+   client-supplied ``X-OpenHost-*`` headers, so the header is
+   trustworthy). Authentication into the admin console itself is
+   Keycloak's own: admins sign in with their personal Keycloak accounts,
+   so admin events are attributable to individual users.
 
 3. Header hygiene: rewrites ``Host`` from ``X-Forwarded-Host`` (Keycloak
    builds issuer/redirect URLs from forwarded headers), guarantees
@@ -64,12 +66,17 @@ UPSTREAM_TIMEOUT_SECONDS = 120
 
 OWNER_HEADER = "X-OpenHost-Is-Owner"
 
-# Paths (as decoded, normalized segment tuples) that require the OpenHost
-# owner header. Keep in sync with the rationale in openhost.toml.
-OWNER_ONLY_SEGMENT_PREFIXES = (
-    ("admin",),
-    ("realms", "master"),
-)
+# Owner-gated surfaces (checked on decoded, normalized path segments;
+# keep in sync with the rationale in openhost.toml):
+#
+# - /realms/master/...: the master realm's login pages and OIDC endpoints.
+#   Only humans administering Keycloak ever need these, and they sit under
+#   the public /realms/ prefix, so gate them to the zone owner.
+# - /admin/... EXCEPT /admin/realms/...: the admin console UI. The
+#   /admin/realms/ subtree is Keycloak's admin REST API, which enforces
+#   its own bearer-token auth on every request; it is left reachable so
+#   trusted external backends (service accounts with e.g. manage-users)
+#   can manage users without OpenHost owner credentials.
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -115,9 +122,10 @@ def normalized_segments(raw_path: str) -> list:
 
 def is_owner_only(raw_path: str) -> bool:
     segments = normalized_segments(raw_path)
-    for prefix in OWNER_ONLY_SEGMENT_PREFIXES:
-        if tuple(segments[: len(prefix)]) == prefix:
-            return True
+    if tuple(segments[:2]) == ("realms", "master"):
+        return True
+    if segments[:1] == ["admin"] and segments[1:2] != ["realms"]:
+        return True
     return False
 
 

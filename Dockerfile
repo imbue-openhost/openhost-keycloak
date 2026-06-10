@@ -12,8 +12,12 @@
 
 FROM quay.io/keycloak/keycloak:26.6.3 AS keycloak-dist
 
+# cache=local: this is a deliberately single-node deployment (one container
+# per app on OpenHost). The default distributed cache would start a JGroups
+# stack and try jdbc-ping discovery against stale rows after restarts.
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true \
+    KC_CACHE=local \
     KC_HTTP_RELATIVE_PATH=/
 
 RUN /opt/keycloak/bin/kc.sh build

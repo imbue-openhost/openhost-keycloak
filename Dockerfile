@@ -33,6 +33,9 @@ RUN apt-get update \
         postgresql-client-16 \
         python3 \
         gosu \
+        # curl is for operators: `podman exec` + curl against Keycloak's
+        # loopback port is the supported way to script the admin REST API
+        # without exposing /admin publicly (see README).
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*

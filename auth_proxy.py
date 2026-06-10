@@ -268,13 +268,20 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
         return headers
 
     def _forward(self, body: bytes, upstream_headers: dict):
+        # BaseHTTPRequestHandler decodes the request line as iso-8859-1, so
+        # self.path can carry raw 0x80-0xFF code points; http.client would
+        # crash encoding them as ASCII. Percent-encode anything non-ASCII
+        # ("%" kept safe so existing escapes pass through untouched).
+        target = urllib.parse.quote(
+            self.path, safe="!#$%&'()*+,/:;=?@[]~", encoding="iso-8859-1"
+        )
         connection = http.client.HTTPConnection(
             UPSTREAM_HOST, UPSTREAM_PORT, timeout=UPSTREAM_TIMEOUT_SECONDS
         )
         try:
-            connection.request(self.command, self.path, body=body, headers=upstream_headers)
+            connection.request(self.command, target, body=body, headers=upstream_headers)
             response = connection.getresponse()
-        except (http.client.HTTPException, socket.timeout, OSError):
+        except (http.client.HTTPException, socket.timeout, OSError, UnicodeError):
             # Covers connection-refused (cold start), timeouts, and
             # malformed upstream responses (BadStatusLine etc.).
             connection.close()

@@ -98,15 +98,17 @@ admin console persist. Defaults:
 `/admin/` is owner-gated, so external automation can't call the Keycloak
 admin REST API anonymously. Options, in order of preference:
 
-- Run the automation as an app on the same OpenHost zone and call Keycloak
-  through the router with the zone owner's API token (the router stamps the
-  owner header and forwards the request; note the `Authorization` header is
-  used by the OpenHost router, so use Keycloak's `access_token` query/body
-  forms or run the call from a browser-session context).
-- If you need direct service-account access from outside, add
-  `"/admin/realms/"` to `public_paths` — Keycloak fully enforces its own
-  bearer-token auth there; gating it is defense in depth, not the only
-  lock.
+- Preferred: run the automation next to Keycloak and call it on loopback,
+  e.g. `podman exec openhost-keycloak curl http://127.0.0.1:8081/admin/...`
+  (curl ships in the image for exactly this), or run it as an app on the
+  same OpenHost zone calling through the router with the owner's API token.
+- If you need direct service-account access from outside, open the surface
+  in BOTH layers: add `"/admin/realms/"` to `public_paths` in
+  `openhost.toml` AND remove (or narrow) the `("admin",)` entry in
+  `OWNER_ONLY_SEGMENT_PREFIXES` in `auth_proxy.py` — otherwise the
+  in-container proxy still 404s the request. Keycloak fully enforces its
+  own bearer-token auth on the admin REST API either way; the gates are
+  defense in depth, not the only lock.
 
 ## Installing
 

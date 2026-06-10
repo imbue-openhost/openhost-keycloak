@@ -260,7 +260,9 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             connection.request(self.command, self.path, body=body, headers=upstream_headers)
             response = connection.getresponse()
-        except (ConnectionRefusedError, socket.timeout, OSError):
+        except (http.client.HTTPException, socket.timeout, OSError):
+            # Covers connection-refused (cold start), timeouts, and
+            # malformed upstream responses (BadStatusLine etc.).
             connection.close()
             self._respond_upstream_down()
             return

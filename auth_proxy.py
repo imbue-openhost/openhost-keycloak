@@ -45,6 +45,18 @@ UPSTREAM_PORT = int(os.environ.get("KC_UPSTREAM_PORT", "8081"))
 # and a small cap limits memory-exhaustion abuse on this public port.
 MAX_BODY_BYTES_OWNER = 64 * 1024 * 1024
 MAX_BODY_BYTES_ANON = 1 * 1024 * 1024
+
+# The public scheme of the zone. TLS terminates at the zone's Caddy, and
+# the OpenHost router forwards X-Forwarded-Proto as "http" (its own inbound
+# scheme), which would make Keycloak mint http:// issuer/redirect URLs.
+# Force the real external scheme; dev zones (lvh.me/localhost) are http.
+_ZONE_DOMAIN = os.environ.get("OPENHOST_ZONE_DOMAIN", "")
+EXTERNAL_SCHEME = os.environ.get(
+    "EXTERNAL_SCHEME",
+    "http"
+    if ("lvh.me" in _ZONE_DOMAIN or "localhost" in _ZONE_DOMAIN or not _ZONE_DOMAIN)
+    else "https",
+)
 CLIENT_TIMEOUT_SECONDS = 60
 UPSTREAM_TIMEOUT_SECONDS = 120
 
@@ -230,8 +242,9 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
         forwarded_host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
         headers["Host"] = forwarded_host
         headers.setdefault("X-Forwarded-Host", forwarded_host)
-        if not self.headers.get("X-Forwarded-Proto"):
-            headers["X-Forwarded-Proto"] = "https"
+        # Always override: the router's value reflects its own inbound
+        # (plain-HTTP) leg, not what the visitor's browser used.
+        headers["X-Forwarded-Proto"] = EXTERNAL_SCHEME
         client_ip = self.client_address[0]
         if not self.headers.get("X-Forwarded-For"):
             headers["X-Forwarded-For"] = client_ip

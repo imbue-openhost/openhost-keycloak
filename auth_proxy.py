@@ -15,47 +15,32 @@ Responsibilities:
    be anonymous, so requests to ``/admin`` and ``/realms/master`` are
    rejected unless the OpenHost router stamped ``X-OpenHost-Is-Owner:
    true`` (the router strips any client-supplied ``X-OpenHost-*`` headers,
-   so the header is trustworthy).
+   so the header is trustworthy). Authentication into the admin console
+   itself is Keycloak's own: admins sign in with their personal Keycloak
+   accounts, so admin events are attributable to individual users.
 
-3. Owner auto-login (OpenHost SSO): when the OpenHost owner navigates to
-   an owner-only page (e.g. the admin console) without a Keycloak session,
-   the proxy drives Keycloak's own browser login on loopback using the
-   per-boot bootstrap admin credentials (``SSO_USER`` / ``SSO_PASSWORD``,
-   passed via environment by start.sh, never written to disk) and replays
-   Keycloak's session cookies onto the visitor's browser. The owner lands
-   in the admin console without ever seeing a Keycloak login form.
-
-4. Header hygiene: rewrites ``Host`` from ``X-Forwarded-Host`` (Keycloak
+3. Header hygiene: rewrites ``Host`` from ``X-Forwarded-Host`` (Keycloak
    builds issuer/redirect URLs from forwarded headers), guarantees
    ``X-Forwarded-Proto`` is set, and strips ``X-OpenHost-*`` headers
    before forwarding upstream.
 
-5. Basic abuse hardening: request body size cap and client socket
+4. Basic abuse hardening: request body size cap and client socket
    timeouts (this port serves anonymous internet traffic).
 
 Stdlib only; no third-party dependencies.
 """
 
-import base64
-import hashlib
-import html
 import http.client
 import http.server
-import json
 import os
 import posixpath
-import re
-import secrets
 import socket
 import sys
-import threading
-import time
 import urllib.parse
 
 LISTEN_PORT = int(os.environ.get("PROXY_LISTEN_PORT", "8080"))
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = int(os.environ.get("KC_UPSTREAM_PORT", "8081"))
-MANAGEMENT_PORT = int(os.environ.get("KC_MANAGEMENT_PORT", "9000"))
 
 # Owner requests (admin console, realm imports) get a generous cap;
 # anonymous internet traffic (login forms, token requests) needs far less,
@@ -78,34 +63,6 @@ CLIENT_TIMEOUT_SECONDS = 60
 UPSTREAM_TIMEOUT_SECONDS = 120
 
 OWNER_HEADER = "X-OpenHost-Is-Owner"
-
-_APP_NAME = os.environ.get("OPENHOST_APP_NAME", "keycloak")
-DEFAULT_PUBLIC_HOST = f"{_APP_NAME}.{_ZONE_DOMAIN}" if _ZONE_DOMAIN else "localhost"
-
-# Per-boot bootstrap admin used for owner auto-login. start.sh generates a
-# fresh random pair on every container start and passes it via environment;
-# neither value ever touches disk. Empty values disable auto-login (the
-# owner then sees Keycloak's own login form).
-SSO_USER = os.environ.get("SSO_USER", "")
-SSO_PASSWORD = os.environ.get("SSO_PASSWORD", "")
-SSO_USER_PREFIX = "openhost-sso-"
-
-# Keycloak's master-realm session cookie. It is scoped Path=/realms/master/,
-# so the browser never sends it on /admin or / navigations -- the proxy
-# cannot see it there to know the owner is already logged in. We therefore
-# set our own Path=/ marker cookie alongside the Keycloak cookies; it
-# expires before Keycloak's default 30-minute SSO idle timeout, so an
-# expired Keycloak session simply triggers a fresh (silent) auto-login.
-SESSION_COOKIE = "KEYCLOAK_IDENTITY"
-MARKER_COOKIE = "OPENHOST_KC_SSO"
-MARKER_MAX_AGE = 25 * 60
-
-# Paths anonymous visitors may reach. MUST mirror routing.public_paths in
-# openhost.toml. The owner is never auto-logged-in on these paths: customer
-# realm logins (and the master-realm OIDC endpoints the admin console uses
-# *after* the SSO cookie exists) must flow through untouched.
-PUBLIC_PATH_PREFIXES = ("/realms/", "/resources/", "/js/")
-PUBLIC_PATH_EXACT = ("/robots.txt",)
 
 # Paths (as decoded, normalized segment tuples) that require the OpenHost
 # owner header. Keep in sync with the rationale in openhost.toml.
@@ -162,201 +119,6 @@ def is_owner_only(raw_path: str) -> bool:
         if tuple(segments[: len(prefix)]) == prefix:
             return True
     return False
-
-
-def is_public_path(raw_path: str) -> bool:
-    path = raw_path.split("?", 1)[0]
-    return path in PUBLIC_PATH_EXACT or path.startswith(PUBLIC_PATH_PREFIXES)
-
-
-# --------------------------------------------------------- owner auto-login
-
-
-class LoginError(Exception):
-    pass
-
-
-def _log(message: str):
-    sys.stderr.write("[proxy] %s\n" % message)
-    sys.stderr.flush()
-
-
-def _sso_request(method: str, path: str, headers: dict, body: bytes = None, port: int = UPSTREAM_PORT):
-    """One loopback HTTP request; returns (status, headers, body)."""
-    connection = http.client.HTTPConnection(UPSTREAM_HOST, port, timeout=30)
-    try:
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        data = response.read()
-        return response.status, response.headers, data
-    finally:
-        connection.close()
-
-
-def _sso_base_headers(public_host: str) -> dict:
-    return {
-        "Host": public_host,
-        "X-Forwarded-Host": public_host,
-        "X-Forwarded-Proto": EXTERNAL_SCHEME,
-        "X-Forwarded-For": "127.0.0.1",
-        "Accept": "text/html,application/xhtml+xml",
-        "User-Agent": "openhost-keycloak-proxy",
-        "Connection": "close",
-    }
-
-
-def _cookie_header_from(set_cookies: list) -> str:
-    pairs = []
-    for set_cookie in set_cookies:
-        first = set_cookie.split(";", 1)[0].strip()
-        if "=" in first:
-            pairs.append(first)
-    return "; ".join(pairs)
-
-
-def perform_owner_login(public_host: str) -> list:
-    """Drive Keycloak's own browser login as the per-boot bootstrap admin.
-
-    Initiates a synthetic admin-console OIDC flow on loopback, submits the
-    login form, and returns the resulting ``Set-Cookie`` values so they can
-    be replayed onto the owner's browser. The authorization code produced
-    by the flow is deliberately abandoned: only the master-realm SSO
-    session cookie matters -- with it set, the real admin-console OIDC
-    redirect completes silently. Raises LoginError when the flow fails.
-    """
-    if not SSO_USER or not SSO_PASSWORD:
-        raise LoginError("SSO credentials not configured")
-
-    code_verifier = secrets.token_urlsafe(48)
-    code_challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
-        .rstrip(b"=")
-        .decode()
-    )
-    redirect_uri = f"{EXTERNAL_SCHEME}://{public_host}/admin/master/console/"
-    auth_path = "/realms/master/protocol/openid-connect/auth?" + urllib.parse.urlencode(
-        {
-            "client_id": "security-admin-console",
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "openid",
-            "state": secrets.token_urlsafe(16),
-            "nonce": secrets.token_urlsafe(16),
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-        }
-    )
-
-    status, headers, body = _sso_request("GET", auth_path, _sso_base_headers(public_host))
-    if status != 200:
-        raise LoginError(f"auth endpoint returned {status}")
-    auth_cookies = headers.get_all("Set-Cookie") or []
-
-    match = re.search(r'<form[^>]+action="([^"]+)"', body.decode("utf-8", "replace"))
-    if not match:
-        raise LoginError("could not find login form action")
-    action = urllib.parse.urlparse(html.unescape(match.group(1)))
-    form_path = action.path + (f"?{action.query}" if action.query else "")
-
-    form_headers = _sso_base_headers(public_host)
-    form_headers["Content-Type"] = "application/x-www-form-urlencoded"
-    form_headers["Cookie"] = _cookie_header_from(auth_cookies)
-    form_body = urllib.parse.urlencode(
-        {"username": SSO_USER, "password": SSO_PASSWORD, "credentialId": ""}
-    ).encode()
-    status, headers, _ = _sso_request("POST", form_path, form_headers, form_body)
-    location = headers.get("Location") or ""
-    if status not in (302, 303) or "code=" not in location:
-        raise LoginError(f"login POST returned {status} (location={location!r})")
-    login_cookies = headers.get_all("Set-Cookie") or []
-
-    # Merge by cookie name (login-response values win) and replay only the
-    # KEYCLOAK_* session cookies. Replaying the consumed AUTH_SESSION_ID
-    # cookie would break the browser's subsequent silent SSO (Keycloak then
-    # shows the login form instead of issuing a code).
-    merged = {}
-    for set_cookie in auth_cookies + login_cookies:
-        name = set_cookie.split("=", 1)[0].strip()
-        if name.startswith("KEYCLOAK_"):
-            merged[name] = set_cookie
-    if SESSION_COOKIE not in merged:
-        raise LoginError("login flow did not produce an identity cookie")
-    return list(merged.values())
-
-
-def _get_admin_token(public_host: str):
-    headers = _sso_base_headers(public_host)
-    headers["Accept"] = "application/json"
-    headers["Content-Type"] = "application/x-www-form-urlencoded"
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "password",
-            "client_id": "admin-cli",
-            "username": SSO_USER,
-            "password": SSO_PASSWORD,
-        }
-    ).encode()
-    status, _, data = _sso_request(
-        "POST", "/realms/master/protocol/openid-connect/token", headers, body
-    )
-    if status != 200:
-        _log(f"admin token request failed: {status}")
-        return None
-    return json.loads(data)["access_token"]
-
-
-def _wait_for_keycloak_ready(timeout: float = 600.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            status, _, _ = _sso_request(
-                "GET", "/health/ready", {"Connection": "close"}, port=MANAGEMENT_PORT
-            )
-            if status == 200:
-                return True
-        except OSError:
-            pass
-        time.sleep(3)
-    return False
-
-
-def cleanup_stale_sso_users():
-    """Delete per-boot bootstrap admins left behind by previous boots."""
-    if not SSO_USER or not SSO_PASSWORD:
-        return
-    public_host = DEFAULT_PUBLIC_HOST
-    try:
-        if not _wait_for_keycloak_ready():
-            _log("keycloak never became ready; skipping stale SSO-user cleanup")
-            return
-        token = _get_admin_token(public_host)
-        if token is None:
-            _log("could not obtain admin token; skipping stale SSO-user cleanup")
-            return
-        api_headers = _sso_base_headers(public_host)
-        api_headers["Accept"] = "application/json"
-        api_headers["Authorization"] = f"Bearer {token}"
-        query = urllib.parse.urlencode({"username": SSO_USER_PREFIX, "max": "200"})
-        status, _, data = _sso_request(
-            "GET", f"/admin/realms/master/users?{query}", api_headers
-        )
-        if status != 200:
-            _log(f"stale SSO-user search failed: {status}")
-            return
-        removed = 0
-        for user in json.loads(data):
-            username = user.get("username", "")
-            if username.startswith(SSO_USER_PREFIX) and username != SSO_USER:
-                status, _, _ = _sso_request(
-                    "DELETE", f"/admin/realms/master/users/{user['id']}", api_headers
-                )
-                if status == 204:
-                    removed += 1
-                else:
-                    _log(f"failed to delete stale SSO user {username}: {status}")
-        _log(f"stale SSO-user cleanup done ({removed} removed)")
-    except Exception as exc:  # never kill the proxy over cleanup
-        _log(f"stale SSO-user cleanup error: {exc}")
 
 
 class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -431,9 +193,6 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_simple(404, b"not found\n")
             return
 
-        if is_owner and self._should_auto_login() and self._try_auto_login():
-            return
-
         body, error = self._read_body(
             MAX_BODY_BYTES_OWNER if is_owner else MAX_BODY_BYTES_ANON
         )
@@ -442,55 +201,6 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
 
         upstream_headers = self._build_upstream_headers(body)
         self._forward(body, upstream_headers)
-
-    # ----------------------------------------------------- owner auto-login
-    def _should_auto_login(self) -> bool:
-        """Owner HTML navigation to a non-public page without a session."""
-        if self.command != "GET":
-            return False
-        if is_public_path(self.path):
-            return False
-        if "text/html" not in (self.headers.get("Accept") or "").lower():
-            return False
-        cookies = self.headers.get("Cookie") or ""
-        if f"{MARKER_COOKIE}=" in cookies:
-            return False
-        return f"{SESSION_COOKIE}=" not in cookies
-
-    def _try_auto_login(self) -> bool:
-        """Mint a Keycloak session for the owner; True when handled."""
-        public_host = (
-            self.headers.get("X-Forwarded-Host")
-            or self.headers.get("Host")
-            or DEFAULT_PUBLIC_HOST
-        )
-        try:
-            session_cookies = perform_owner_login(public_host)
-        except LoginError as exc:
-            _log(f"owner auto-login failed, falling through to proxy: {exc}")
-            return False
-        except (http.client.HTTPException, socket.timeout, OSError):
-            # Keycloak unreachable (cold start); let the normal forwarding
-            # path produce the placeholder / 503.
-            return False
-        marker = f"{MARKER_COOKIE}=1; Path=/; Max-Age={MARKER_MAX_AGE}; HttpOnly; SameSite=Lax"
-        if EXTERNAL_SCHEME == "https":
-            marker += "; Secure"
-        self.close_connection = True
-        try:
-            self.send_response(302)
-            self.send_header("Location", self.path)
-            for cookie in session_cookies:
-                self.send_header("Set-Cookie", cookie)
-            self.send_header("Set-Cookie", marker)
-            self.send_header("Content-Length", "0")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.end_headers()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        _log("owner auto-login performed")
-        return True
 
     def _read_body(self, max_body_bytes: int):
         transfer_encoding = (self.headers.get("Transfer-Encoding") or "").lower()
@@ -617,7 +327,6 @@ class KeycloakProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    threading.Thread(target=cleanup_stale_sso_users, daemon=True).start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), KeycloakProxyHandler)
     server.daemon_threads = True
     print(

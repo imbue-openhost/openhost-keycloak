@@ -28,18 +28,24 @@ need:
 
 - `/realms/` – OIDC discovery/token/userinfo endpoints, realm login and
   registration pages, and the account console of customer realms.
+- `/admin/realms/` – Keycloak's admin REST API. Keycloak enforces its own
+  bearer-token auth on every endpoint here (anonymous requests get 401);
+  it is open at the routing layer so trusted backends with service
+  accounts can manage users (see below).
 - `/resources/`, `/js/` – static theme assets and `keycloak.js`.
 - `/robots.txt`
 
-Everything else (the `/` welcome page, `/admin`, Keycloak's admin REST API)
-stays behind OpenHost owner auth. Because `public_paths` matching is
+Everything else (the `/` welcome page and the `/admin` console UI) stays
+behind OpenHost owner auth. Because `public_paths` matching is
 prefix-based, `/realms/` would also expose the **master** realm; the
-in-container proxy therefore additionally rejects `/admin` and
-`/realms/master` (with 404) for any request the OpenHost router did not
-stamp with `X-OpenHost-Is-Owner: true`. The router strips client-supplied
-`X-OpenHost-*` headers, so that header cannot be forged. Net effect:
+in-container proxy therefore additionally rejects `/realms/master` and
+`/admin` outside `/admin/realms/` (with 404) for any request the OpenHost
+router did not stamp with `X-OpenHost-Is-Owner: true`. The router strips
+client-supplied `X-OpenHost-*` headers, so that header cannot be forged.
+Net effect:
 
-- Anonymous internet users: customer realm logins + OIDC only.
+- Anonymous internet users: customer realm logins + OIDC, plus the
+  bearer-token-protected admin REST API.
 - OpenHost zone owner: everything, including the admin console — behind
   Keycloak's **own login** (see below).
 
@@ -104,22 +110,28 @@ admin console persist. Defaults:
 3. The service uses standard OIDC with discovery URL:
    `https://keycloak.<zone>/realms/openhost-customers/.well-known/openid-configuration`
 
-### Admin REST API automation
+### User management from trusted backends
 
-`/admin/` is owner-gated, so external automation can't call the Keycloak
-admin REST API anonymously. Options, in order of preference:
+Trusted backends (billing portal, vm-manager, provisioning jobs) manage
+customer accounts through Keycloak's admin REST API with a **service
+account**, not with human credentials:
 
-- Preferred: run the automation next to Keycloak and call it on loopback,
-  e.g. `podman exec openhost-keycloak curl http://127.0.0.1:8081/admin/...`
-  (curl ships in the image for exactly this), or run it as an app on the
-  same OpenHost zone calling through the router with the owner's API token.
-- If you need direct service-account access from outside, open the surface
-  in BOTH layers: add `"/admin/realms/"` to `public_paths` in
-  `openhost.toml` AND remove (or narrow) the `("admin",)` entry in
-  `OWNER_ONLY_SEGMENT_PREFIXES` in `auth_proxy.py` — otherwise the
-  in-container proxy still 404s the request. Keycloak fully enforces its
-  own bearer-token auth on the admin REST API either way; the gates are
-  defense in depth, not the only lock.
+1. Admin console → realm `openhost-customers` → Clients → Create client:
+   OpenID Connect, confidential (client authentication ON), Service
+   accounts roles ON, standard/direct-access flows OFF.
+2. On the client's "Service accounts roles" tab, assign the
+   `realm-management` → `manage-users` role (add `view-users` /
+   `manage-realm` etc. only as needed — least privilege).
+3. The backend fetches a token with the client-credentials grant from
+   `/realms/openhost-customers/protocol/openid-connect/token` and calls
+   e.g. `POST /admin/realms/openhost-customers/users` with it as a Bearer
+   token. Both endpoints are reachable externally; Keycloak enforces the
+   token on every admin call, and admin events record which client made
+   each change.
+
+For one-off automation you can also bypass the router entirely:
+`podman exec openhost-keycloak curl http://127.0.0.1:8081/admin/...`
+(curl ships in the image for exactly this).
 
 ## Installing
 

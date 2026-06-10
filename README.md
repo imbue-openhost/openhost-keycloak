@@ -108,6 +108,15 @@ admin REST API anonymously. Options, in order of preference:
   bearer-token auth there; gating it is defense in depth, not the only
   lock.
 
+## Installing
+
+Install like any OpenHost app: dashboard → Add App →
+`https://github.com/imbue-openhost/openhost-keycloak`. Note this repo is
+private, so the OpenHost instance needs GitHub authorization (the add-app
+flow offers it) or a deploy token; alternatively mirror the repo somewhere
+the instance can clone. First build takes a few minutes (Keycloak dist +
+Postgres image layers).
+
 ## Operational notes
 
 - **Memory**: 2 GiB for the app; the JVM heap is capped at 1 GiB in

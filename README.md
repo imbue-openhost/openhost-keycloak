@@ -101,6 +101,18 @@ admin console persist. Defaults:
   refresh-token revocation on, login/admin event logging on (30-day
   retention).
 
+### Provisioning the OpenHost service clients (scripted)
+
+To set up the clients, scope, and mappers that the OpenHost services
+(vm-manager, cert-api, hosted-spaces) assume exist, run
+[`scripts/setup-keycloak-clients.sh`](scripts/setup-keycloak-clients.sh) — it
+creates the shared `cert-api` client scope (with the `subdomain` + audience
+mappers vm-manager attaches per instance), the `vm-manager-provisioner` admin
+client, and the `hosted-spaces` login client in one idempotent pass, then prints
+the credentials to copy into each service. See
+[`docs/client-setup.md`](docs/client-setup.md) for the walkthrough. The manual
+steps below remain the reference for one-off / by-hand registration.
+
 ### Registering a downstream service (e.g. billing portal, vm-manager)
 
 1. Admin console → realm `openhost-customers` → Clients → Create client.

@@ -4,7 +4,7 @@
   "displayName": "OpenHost",
   "displayNameHtml": "<div class=\"kc-logo-text\"><span>OpenHost</span></div>",
   "sslRequired": "external",
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "registrationEmailAsUsername": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
@@ -30,6 +30,6 @@
   "adminEventsEnabled": true,
   "adminEventsDetailsEnabled": true,
   "attributes": {
-    "_comment": "Auth realm for customers of managed OpenHost instances. Registration is disabled until SMTP is configured (Realm settings -> Email); see README.md. OIDC clients for the billing portal / vm-manager / customer dashboards should be created in this realm."
+    "_comment": "Auth realm for customers of managed OpenHost instances. Self-registration is enabled with email verification off, so no SMTP is required to sign up (see README.md). Password reset (resetPasswordAllowed) still needs SMTP and won't work until Realm settings -> Email is configured. OIDC clients for the billing portal / vm-manager / customer dashboards should be created in this realm."
   }
 }

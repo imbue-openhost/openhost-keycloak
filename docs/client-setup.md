@@ -33,6 +33,7 @@ Everything lives in the **`openhost-customers`** realm (never `master`).
 
 | # | Object | For | Why |
 |---|---|---|---|
+| 0 | **Realm login settings** — self-registration on, email verification off | the realm | Lets customers sign up with no SMTP server. Realm import only applies to a *fresh* realm, so the script also corrects an already-running realm imported with registration off. |
 | 1 | `cert-api` **client scope** + `subdomain` and `cert-api-audience` mappers | openhost-cert-api | cert-api requires every instance token to carry a `subdomain` claim and `aud: openhost-cert-api`. vm-manager attaches this scope to each per-instance client it mints, so the mappers live in **one** place instead of on N clients. |
 | 2 | `vm-manager-provisioner` **client** (confidential, service account, `realm-management` → `manage-clients` + `manage-users`) | openhost-vm-manager | The trusted identity vm-manager authenticates as to call the admin REST API and mint/revoke the per-instance clients. |
 | 3 | `hosted-spaces` **client** (confidential, authorization-code flow) | imbue-hosted-spaces | The public signup/dashboard site logs customers in through this client. Only created when you pass its base URL. |
@@ -45,6 +46,14 @@ Two things are deliberately **not** created here:
   vm-manager during provisioning. You never touch them. The `subdomain` mapper
   on the `cert-api` scope is exactly the "mapper vm-manager attaches to the
   per-instance service clients."
+
+> **No SMTP required to sign up.** Registration is enabled with email
+> verification off, so account creation needs no mail server. **Password reset**
+> (`resetPasswordAllowed`, on by default) *does* need SMTP — the "Forgot
+> password" link will appear but fail until you configure Realm settings →
+> Email. If you'd rather hide it for now, turn `resetPasswordAllowed` off there.
+> To require verified emails later, re-enable email verification once SMTP is
+> set up.
 
 The cross-repo contract these match lives in openhost-cert-api's
 `docs/auth-keycloak-structure.md` and openhost-vm-manager's

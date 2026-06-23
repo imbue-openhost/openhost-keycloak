@@ -117,7 +117,23 @@ info "got admin token"
 # Confirm the target realm exists (it is imported on Keycloak's first boot).
 api "GET" ""
 [[ "$LAST_STATUS" == "200" ]] || die "realm '$REALM' not found (HTTP $LAST_STATUS). It is imported on first boot; check the realm name / deployment."
+REALM_REP="$LAST_BODY"
 info "realm '$REALM' present"
+
+# ---------------------------------------------------------------- 0. login settings
+# Self-registration ON, email verification OFF -> customers can sign up without
+# any SMTP server. (Realm import only applies to a *fresh* realm, so this also
+# corrects an already-running realm that was imported with registration off.)
+# Note: password reset still needs SMTP; it is left as-is by this script.
+step "Realm login settings (self-registration on, email verification off)"
+if [[ "$(echo "$REALM_REP" | jq '.registrationAllowed == true and .verifyEmail == false')" == "true" ]]; then
+  info "already: self-registration on, email verification off"
+else
+  UPDATED=$(echo "$REALM_REP" | jq '.registrationAllowed = true | .verifyEmail = false')
+  api "PUT" "" "$UPDATED"
+  [[ "$LAST_STATUS" =~ ^2 ]] || die "update realm login settings -> HTTP $LAST_STATUS: $LAST_BODY"
+  info "enabled self-registration; email verification off"
+fi
 
 # ---------------------------------------------------------------- 1. cert-api scope
 step "Client scope '$CERT_API_SCOPE' (+ subdomain & audience mappers)"

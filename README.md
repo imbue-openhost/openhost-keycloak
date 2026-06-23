@@ -94,9 +94,12 @@ realm → Users).
 happens when the realm doesn't already exist, so changes made later in the
 admin console persist. Defaults:
 
-- Self-registration **disabled** — enable it (Realm settings → Login) after
-  configuring SMTP (Realm settings → Email), otherwise password reset and
-  email verification cannot work.
+- Self-registration **enabled** with email verification **off**, so customers
+  can sign up without any SMTP server. Password reset (`resetPasswordAllowed`)
+  still needs SMTP and won't work until you configure Realm settings → Email; to
+  send verification emails too, turn email verification back on there. Realm
+  import only applies to a *fresh* realm, so `scripts/setup-keycloak-clients.sh`
+  also flips these on an already-running realm (see `docs/client-setup.md`).
 - Email as username, brute-force protection on, 12-char minimum passwords,
   refresh-token revocation on, login/admin event logging on (30-day
   retention).

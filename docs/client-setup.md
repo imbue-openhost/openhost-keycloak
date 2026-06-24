@@ -23,7 +23,8 @@ Everything lives in the **`openhost-customers`** realm (never `master`).
   │                                              manage-users          │
   │                                                                    │
   │  hosted-spaces (client)                                            │
-  │   └─ auth-code login for the public site                          │
+  │   ├─ auth-code login for the public site                          │
+  │   └─ service account ON -> client-credentials token to vm-manager │
   │                                                                    │
   │  instance-<fqdn> (clients)   ← minted automatically by vm-manager  │
   │   ├─ service account: subdomain=<fqdn>                             │
@@ -36,7 +37,7 @@ Everything lives in the **`openhost-customers`** realm (never `master`).
 | 0 | **Realm login settings** — self-registration on, email verification off | the realm | Lets customers sign up with no SMTP server. Realm import only applies to a *fresh* realm, so the script also corrects an already-running realm imported with registration off. |
 | 1 | `cert-api` **client scope** + `subdomain` and `cert-api-audience` mappers | openhost-cert-api | cert-api requires every instance token to carry a `subdomain` claim and `aud: openhost-cert-api`. vm-manager attaches this scope to each per-instance client it mints, so the mappers live in **one** place instead of on N clients. |
 | 2 | `vm-manager-provisioner` **client** (confidential, service account, `realm-management` → `manage-clients` + `manage-users`) | openhost-vm-manager | The trusted identity vm-manager authenticates as to call the admin REST API and mint/revoke the per-instance clients. |
-| 3 | `hosted-spaces` **client** (confidential, authorization-code flow) | imbue-hosted-spaces | The public signup/dashboard site logs customers in through this client. Only created when you pass its base URL. |
+| 3 | `hosted-spaces` **client** (confidential, authorization-code flow **+ service account**) | imbue-hosted-spaces | The public signup/dashboard site uses it both to log customers in (auth-code flow) and to mint a client-credentials token to call vm-manager's `/api/v1/` provisioning API (service account). Only created when you pass its base URL. |
 
 Two things are deliberately **not** created here:
 
@@ -135,6 +136,12 @@ Settings:
 | `keycloak_url` | your `KC_URL` |
 | `keycloak_realm` | `openhost-customers` |
 | `cert_api_scope` | `cert-api` |
+| `keycloak_allowed_clients` | `hosted-spaces` (or leave empty = accept any valid realm token) |
+
+`keycloak_allowed_clients` is the allowlist vm-manager checks against the
+inbound token's `azp` claim when imbue-spaces calls its `/api/v1/` provisioning
+API. If it's set but doesn't include `hosted-spaces`, vm-manager rejects the
+call even though Keycloak minted a valid token.
 
 ### imbue-hosted-spaces
 

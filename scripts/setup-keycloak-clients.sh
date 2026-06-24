@@ -12,8 +12,12 @@
 #   2. `vm-manager-provisioner` — the confidential admin client vm-manager
 #      authenticates as to mint/revoke per-instance clients (service account
 #      with `realm-management` -> manage-clients + manage-users).
-#   3. `hosted-spaces` — the confidential authorization-code client the public
-#      signup/dashboard site (imbue-hosted-spaces) logs users in with.
+#   3. `hosted-spaces` — the confidential client the public signup/dashboard
+#      site (imbue-hosted-spaces) uses to (a) log customers in via the
+#      authorization-code flow and (b) mint a client-credentials token (service
+#      account ON) to call vm-manager's /api/v1/ provisioning API. vm-manager's
+#      `keycloak_allowed_clients` setting must allow `hosted-spaces` (or be
+#      empty = any valid realm token); the service account needs no roles.
 #
 # cert-api itself needs no client (it only validates tokens). Per-instance
 # `instance-<fqdn>` clients are created/revoked automatically by vm-manager and
@@ -263,7 +267,7 @@ if [[ -z "$HOSTED_SPACES_BASE_URL" ]]; then
 else
   HOSTED_SPACES_BASE_URL="${HOSTED_SPACES_BASE_URL%/}"
   REDIRECT_URI="$HOSTED_SPACES_BASE_URL/auth/callback"
-  step "Public site client '$HOSTED_SPACES_CLIENT_ID' (auth-code login for $HOSTED_SPACES_BASE_URL)"
+  step "Public site client '$HOSTED_SPACES_CLIENT_ID' (auth-code login + service account for $HOSTED_SPACES_BASE_URL)"
 
   HS_UUID="$(find_client_uuid "$HOSTED_SPACES_CLIENT_ID")"
   if [[ -z "$HS_UUID" ]]; then
@@ -273,12 +277,12 @@ else
       --arg origin "$HOSTED_SPACES_BASE_URL" '{
       clientId: $id,
       protocol: "openid-connect",
-      description: "imbue-hosted-spaces public site: OIDC authorization-code login.",
+      description: "imbue-hosted-spaces public site: OIDC authorization-code login for customers, plus a service account so it can mint a client-credentials token to call vm-managers /api/v1/ provisioning API.",
       publicClient: false,
       standardFlowEnabled: true,
       directAccessGrantsEnabled: false,
       implicitFlowEnabled: false,
-      serviceAccountsEnabled: false,
+      serviceAccountsEnabled: true,
       redirectUris: [$redirect],
       webOrigins: [$origin],
       attributes: { "post.logout.redirect.uris": "+" }
@@ -288,18 +292,20 @@ else
     HS_CREATED="created"
     info "created client '$HOSTED_SPACES_CLIENT_ID' ($HS_UUID)"
   else
-    # Merge the desired redirect URI / web origin into the existing client so a
-    # re-run heals drift without clobbering manually-added entries.
+    # Merge the desired redirect URI / web origin into the existing client and
+    # ensure service accounts are on, so a re-run heals drift without clobbering
+    # manually-added entries.
     api_ok "GET" "/clients/$HS_UUID"
     UPDATED=$(echo "$LAST_BODY" | jq \
       --arg redirect "$REDIRECT_URI" \
       --arg origin "$HOSTED_SPACES_BASE_URL" '
       .redirectUris = ((.redirectUris // []) + [$redirect] | unique) |
-      .webOrigins   = ((.webOrigins   // []) + [$origin]   | unique)')
+      .webOrigins   = ((.webOrigins   // []) + [$origin]   | unique) |
+      .serviceAccountsEnabled = true')
     api "PUT" "/clients/$HS_UUID" "$UPDATED"
     [[ "$LAST_STATUS" =~ ^2 ]] || die "update $HOSTED_SPACES_CLIENT_ID -> HTTP $LAST_STATUS: $LAST_BODY"
     HS_CREATED="updated"
-    info "client '$HOSTED_SPACES_CLIENT_ID' already existed; ensured redirect URI '$REDIRECT_URI'"
+    info "client '$HOSTED_SPACES_CLIENT_ID' already existed; ensured redirect URI '$REDIRECT_URI' + service accounts on"
   fi
   HS_SECRET="$(client_secret "$HS_UUID")"
 fi

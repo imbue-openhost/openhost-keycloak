@@ -18,6 +18,12 @@
 #      account ON) to call vm-manager's /api/v1/ provisioning API. vm-manager's
 #      `keycloak_allowed_clients` setting must allow `hosted-spaces` (or be
 #      empty = any valid realm token); the service account needs no roles.
+#      It also gets a `realm roles` ID-token mapper so the site can read the
+#      caller's realm roles (e.g. `admin`) from the ID token and gate its admin UI.
+#
+# It also creates the `admin` realm role (unassigned) that imbue-hosted-spaces
+# checks for. No user gets it by default — assign it per-person in the admin
+# console (Users -> Role mapping).
 #
 # cert-api itself needs no client (it only validates tokens). Per-instance
 # `instance-<fqdn>` clients are created/revoked automatically by vm-manager and
@@ -139,6 +145,24 @@ else
   info "enabled self-registration; email verification off"
 fi
 
+# ---------------------------------------------------------------- 0b. admin realm role
+# Realm role that downstream sites (imbue-hosted-spaces) check to grant their
+# own admin UI. Created UNASSIGNED — no user gets it by default; assign it
+# per-person in the admin console (Users -> Role mapping). The matching
+# ID-token mapper that surfaces it to hosted-spaces is added to that client below.
+step "Realm role 'admin' (unassigned)"
+api "GET" "/roles/admin"
+if [[ "$LAST_STATUS" == "200" ]]; then
+  info "realm role 'admin' already exists"
+else
+  api "POST" "/roles" "$(jq -n '{
+    name: "admin",
+    description: "Grants admin access in downstream OpenHost sites (e.g. imbue-hosted-spaces), surfaced to clients via the realm-roles ID-token mapper. Not assigned to any user by default."
+  }')"
+  [[ "$LAST_STATUS" =~ ^2 ]] || die "create realm role 'admin' -> HTTP $LAST_STATUS: $LAST_BODY"
+  info "created realm role 'admin'"
+fi
+
 # ---------------------------------------------------------------- 1. cert-api scope
 step "Client scope '$CERT_API_SCOPE' (+ subdomain & audience mappers)"
 
@@ -213,6 +237,22 @@ client_secret() {
   # client_secret UUID -> echoes the secret
   api_ok "GET" "/clients/$1/client-secret"
   echo "$LAST_BODY" | jq -r '.value // empty'
+}
+
+ensure_client_mapper() {
+  # ensure_client_mapper CLIENT_UUID NAME JSON_BODY  — idempotent (by mapper name).
+  # Adds a protocol mapper to the client's own (dedicated) mapper set, i.e. what
+  # the admin console shows under Clients -> <client> -> Client scopes ->
+  # <client>-dedicated.
+  local uuid="$1" name="$2" body="$3"
+  api_ok "GET" "/clients/$uuid/protocol-mappers/models"
+  if echo "$LAST_BODY" | jq -e --arg n "$name" 'any(.[]; .name==$n)' >/dev/null; then
+    info "client mapper '$name' already present"
+    return
+  fi
+  api "POST" "/clients/$uuid/protocol-mappers/models" "$body"
+  [[ "$LAST_STATUS" =~ ^2 ]] || die "create client mapper '$name' -> HTTP $LAST_STATUS: $LAST_BODY"
+  info "created client mapper '$name'"
 }
 
 # ---------------------------------------------------------------- 2. provisioner client
@@ -307,6 +347,28 @@ else
     HS_CREATED="updated"
     info "client '$HOSTED_SPACES_CLIENT_ID' already existed; ensured redirect URI '$REDIRECT_URI' + service accounts on"
   fi
+
+  # Surface the caller's realm roles (e.g. 'admin') in the ID TOKEN so the
+  # public site can gate its own admin UI. The realm's default 'roles' scope
+  # only writes realm_access.roles to the *access* token; imbue-hosted-spaces
+  # reads the ID token, so this dedicated mapper adds it there. access.token
+  # claim is left off to avoid double-writing the claim the default scope
+  # already populates.
+  ensure_client_mapper "$HS_UUID" "realm roles" "$(jq -n '{
+    name: "realm roles",
+    protocol: "openid-connect",
+    protocolMapper: "oidc-usermodel-realm-role-mapper",
+    config: {
+      "multivalued": "true",
+      "claim.name": "realm_access.roles",
+      "jsonType.label": "String",
+      "id.token.claim": "true",
+      "access.token.claim": "false",
+      "userinfo.token.claim": "false",
+      "usermodel.realmRoleMapping.rolePrefix": ""
+    }
+  }')"
+
   HS_SECRET="$(client_secret "$HS_UUID")"
 fi
 

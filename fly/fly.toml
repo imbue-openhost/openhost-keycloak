@@ -1,0 +1,68 @@
+# Fly.io app config for Keycloak. Deploy from the repo root with:
+#   fly deploy --config fly/fly.toml --dockerfile fly/Dockerfile
+# (the repo root is the build context so realms/ is available to COPY).
+#
+# DB credentials and the bootstrap admin are NOT here -- they are Fly secrets
+# (see fly/README.md). This file holds only non-secret runtime config.
+
+app = "openhost-keycloak"
+primary_region = "sjc"
+
+# No [build] section: always deploy from the repo root with an explicit
+#   --dockerfile fly/Dockerfile
+# so the build context is the repo root and realms/ is available to COPY.
+
+[env]
+  # Public hostname Keycloak bakes into OIDC issuer/redirect URLs. Update
+  # this (and re-deploy) when moving to a custom domain.
+  KC_HOSTNAME = "https://openhost-keycloak.fly.dev"
+  # Fly terminates TLS and forwards X-Forwarded-* headers; trust them so
+  # issuer URLs come out https with the real host.
+  KC_PROXY_HEADERS = "xforwarded"
+  KC_HTTP_ENABLED = "true"
+  # We pin KC_HOSTNAME above, so strict mode is unnecessary; keeping it off
+  # avoids surprises behind Fly's proxy.
+  KC_HOSTNAME_STRICT = "false"
+  KC_HEALTH_ENABLED = "true"
+  # Bind the management interface (health/metrics) on all interfaces so the
+  # Fly machine health check below can reach :9000.
+  KC_HTTP_MANAGEMENT_HOST = "0.0.0.0"
+
+  # --- Clustering (distributed Infinispan cache) ---
+  # ispn + the default jdbc-ping discovery stack: nodes find each other
+  # through the shared Postgres, so deploy overlaps and multi-instance HA
+  # share session/login caches. (Also baked at build time in fly/Dockerfile.)
+  KC_CACHE = "ispn"
+  # JGroups must bind to an address every other node can reach. Fly's private
+  # 6PN address is a ULA in fdaa::/16 -- not Java "site-local", so the default
+  # SITE_LOCAL pick misses it. match-address selects the 6PN interface at
+  # runtime (fly.toml env is not shell-expanded, so $FLY_PRIVATE_IP can't be
+  # used here). Inter-machine traffic on the 6PN net is open within the app.
+  KC_CACHE_EMBEDDED_NETWORK_BIND_ADDRESS = "match-address:fdaa:.*"
+  # Fly's private network is IPv6-only; make JGroups prefer IPv6.
+  JAVA_OPTS_APPEND = "-Djava.net.preferIPv6Addresses=true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keycloak cold-starts slowly and holds in-JVM state; never scale to zero
+  # or auto-stop. Exactly one instance to start.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+# Readiness check against Keycloak's management port (health lives on :9000
+# when KC_HEALTH_ENABLED, not on the public 8080 port). Fly will not route
+# traffic / consider a deploy healthy until this passes.
+[checks]
+  [checks.ready]
+    type = "http"
+    port = 9000
+    path = "/health/ready"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "90s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"

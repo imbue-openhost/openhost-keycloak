@@ -135,13 +135,24 @@ documented in the repo-root `README.md` — that all applies unchanged here.
   applies when the realm does **not** already exist; changing an existing
   realm is done in the admin console (persists in Postgres).
 
-## Custom domain (later)
+## Custom domain
 
-1. `fly certs add keycloak.yourdomain.com --app openhost-keycloak` and add the
-   DNS records it prints.
-2. Set `KC_HOSTNAME = "https://keycloak.yourdomain.com"` in `fly/fly.toml` and
-   re-deploy. (Changing the public hostname changes OIDC issuer URLs, so any
-   already-registered clients must be updated to match.)
+The active public hostname is **`keycloak.imbue.com`** (set as `KC_HOSTNAME` in
+`fly/fly.toml`; TLS cert managed via `fly certs` on the app). The
+`openhost-keycloak.fly.dev` name still resolves but emits the same
+`keycloak.imbue.com` issuer.
+
+To change it again:
+
+1. `fly certs add <new-host> --app openhost-keycloak` and add the DNS records it
+   prints; confirm `fly certs show <new-host> --app openhost-keycloak` is Issued.
+2. Set `KC_HOSTNAME = "https://<new-host>"` in `fly/fly.toml` and re-deploy.
+   This is an **issuer change** (`<host>/realms/<realm>`): every OIDC consumer
+   (imbue-hosted-spaces `IMBUE_OIDC_ISSUER`, vm-manager `keycloak_url`, cert-api
+   issuer) must be updated to match, and existing sessions are invalidated
+   (users re-login). If a consumer's own domain changes too, update that
+   client's redirect URIs / web origins (re-run
+   `scripts/setup-keycloak-clients.sh` with the new `HOSTED_SPACES_BASE_URL`).
 
 ## Clustering & deployments
 

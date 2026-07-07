@@ -13,9 +13,13 @@ primary_region = "sjc"
 # so the build context is the repo root and realms/ is available to COPY.
 
 [env]
-  # Public hostname Keycloak bakes into OIDC issuer/redirect URLs. Update
-  # this (and re-deploy) when moving to a custom domain.
-  KC_HOSTNAME = "https://openhost-keycloak.fly.dev"
+  # Public hostname Keycloak bakes into OIDC issuer/redirect URLs. This is the
+  # canonical issuer: Keycloak mints this host in tokens regardless of which
+  # hostname a request arrives on (the openhost-keycloak.fly.dev name still
+  # serves, but emits this issuer too). Changing it is an issuer change -- every
+  # OIDC consumer must expect the new value. TLS cert for this host is managed
+  # via `fly certs` on the app.
+  KC_HOSTNAME = "https://keycloak.imbue.com"
   # Fly terminates TLS and forwards X-Forwarded-* headers; trust them so
   # issuer URLs come out https with the real host.
   KC_PROXY_HEADERS = "xforwarded"
